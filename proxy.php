@@ -78,20 +78,8 @@ function proxy_for(string $url): string {
 $target_url_raw = $_GET['url'] ?? null;
 
 if (!$target_url_raw) {
-    // If no URL is provided, show a welcome page.
-    header('Content-Type: text/html; charset=utf-8');
-    echo "<!doctype html>
-    <html lang='en'>
-    <head>
-        <meta charset='utf-8'>
-        <title>PHP Proxy</title>
-        <style>body { font-family: sans-serif; text-align: center; padding: 4em; }</style>
-    </head>
-    <body>
-        <h1>Simple PHP Proxy</h1>
-        <p>Usage: <code>" . htmlspecialchars($_SERVER['PHP_SELF']) . "?url=https://example.com</code></p>
-    </body>
-    </html>";
+    // If no URL is provided, redirect to the main page (index.html).
+    header('Location: index.html');
     exit;
 }
 
