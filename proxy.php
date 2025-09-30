@@ -1,342 +1,283 @@
 <?php
-/**
- * Ultimate PHP Web Proxy - Final Version
- *
- * This script is engineered for maximum compatibility with modern web applications.
- * It combines server-side DOM parsing with an extremely powerful client-side JavaScript shim
- * to create a virtual environment for the proxied site, handling complex scenarios
- * including JavaScript frameworks, API requests, redirects, and security features.
- */
+// Simplified PHP Web Proxy
 
 // --- CONFIGURATION ---
-error_reporting(E_ALL);
-ini_set('display_errors', 0);
-set_time_limit(180);
-libxml_use_internal_errors(true);
+// Report all errors except notices. This is good for development.
+// For production, you might want to log errors to a file instead.
+error_reporting(E_ALL & ~E_NOTICE);
+ini_set('display_errors', 1); // Show errors for easier debugging
 
-// --- URL & PATH HELPERS ---
+// Set a reasonable time limit for the script to prevent timeouts on slow sites.
+set_time_limit(120);
+
+// --- URL HELPERS ---
+
+/**
+ * Resolves a relative URL to an absolute URL.
+ *
+ * @param string $relative The relative URL to resolve.
+ * @param string $base The base URL to resolve against.
+ * @return string The resolved, absolute URL.
+ */
 function resolve_url(string $relative, string $base): string {
     $relative = trim($relative);
-    if (preg_match('~^(https?://|data:|blob:|mailto:|javascript:|#)~i', $relative)) return $relative;
+    // If it's already a full URL, a data URI, or a mailto link, return it as is.
+    if (preg_match('~^(https?://|data:|mailto:|#)~i', $relative)) {
+        return $relative;
+    }
+
     $base_parts = parse_url($base);
-    if (empty($base_parts['scheme']) || empty($base_parts['host'])) return $relative;
-    if (strpos($relative, '//') === 0) return $base_parts['scheme'] . ':' . $relative;
-    $path = $base_parts['path'] ?? '/';
+    if (empty($base_parts['scheme']) || empty($base_parts['host'])) {
+        return $relative; // Cannot resolve without a valid base.
+    }
+
+    // Handle protocol-relative URLs like //example.com/path
+    if (strpos($relative, '//') === 0) {
+        return $base_parts['scheme'] . ':' . $relative;
+    }
+
+    // Handle root-relative paths like /some/page.html
     if ($relative[0] === '/') {
         $path = $relative;
     } else {
-        $path = dirname($path) . '/' . $relative;
+        // Handle relative paths like 'page.html' or '../style.css'
+        $path = dirname($base_parts['path'] ?? '/') . '/' . $relative;
     }
+
+    // Resolve '..' and '.' segments.
     $parts = [];
     foreach (explode('/', $path) as $part) {
         if ($part === '' || $part === '.') continue;
-        if ($part === '..') array_pop($parts);
-        else $parts[] = $part;
+        if ($part === '..') {
+            array_pop($parts);
+        } else {
+            $parts[] = $part;
+        }
     }
     $abs_path = '/' . implode('/', $parts);
+
     $port = isset($base_parts['port']) ? ':' . $base_parts['port'] : '';
     return $base_parts['scheme'] . '://' . $base_parts['host'] . $port . $abs_path;
 }
 
+/**
+ * Creates a proxy URL for a given target URL.
+ *
+ * @param string $url The target URL.
+ * @return string The URL that will proxy the target URL.
+ */
 function proxy_for(string $url): string {
-    static $self = null;
-    if ($self === null) $self = strtok($_SERVER['REQUEST_URI'], '?');
-    return $self . '?url=' . rawurlencode($url);
+    // Get the path of the current script.
+    $script_path = strtok($_SERVER['REQUEST_URI'], '?');
+    return $script_path . '?url=' . rawurlencode($url);
 }
 
-// --- MAIN ---
+// --- MAIN PROXY LOGIC ---
+
+// 1. Get the target URL from the query string.
 $target_url_raw = $_GET['url'] ?? null;
+
 if (!$target_url_raw) {
+    // If no URL is provided, show a welcome page.
     header('Content-Type: text/html; charset=utf-8');
-    echo "<!doctype html><title>Proxy</title><h1>PHP Proxy</h1><p>Usage: ?url=https://example.com</p>";
+    echo "<!doctype html>
+    <html lang='en'>
+    <head>
+        <meta charset='utf-8'>
+        <title>PHP Proxy</title>
+        <style>body { font-family: sans-serif; text-align: center; padding: 4em; }</style>
+    </head>
+    <body>
+        <h1>Simple PHP Proxy</h1>
+        <p>Usage: <code>" . htmlspecialchars($_SERVER['PHP_SELF']) . "?url=https://example.com</code></p>
+    </body>
+    </html>";
     exit;
 }
 
+// 2. Validate and prepare the URL.
 $target_url = $target_url_raw;
 if (!preg_match('~^https?://~i', $target_url)) {
     $target_url = 'http://' . $target_url;
 }
 $target_parts = parse_url($target_url);
 
-// --- cURL REQUEST PREPARATION ---
+if (empty($target_parts['host'])) {
+    http_response_code(400);
+    die("Invalid URL provided.");
+}
+
+// 3. Initialize cURL to fetch the content.
 $ch = curl_init();
 curl_setopt($ch, CURLOPT_URL, $target_url);
-curl_setopt($ch, CURLOPT_RETURNTRANSFER, true);
-curl_setopt($ch, CURLOPT_HEADER, true);
-curl_setopt($ch, CURLOPT_FOLLOWLOCATION, true);
-curl_setopt($ch, CURLOPT_AUTOREFERER, true);
-curl_setopt($ch, CURLOPT_CONNECTTIMEOUT, 20);
-curl_setopt($ch, CURLOPT_TIMEOUT, 60);
-curl_setopt($ch, CURLOPT_SSL_VERIFYPEER, false);
-curl_setopt($ch, CURLOPT_SSL_VERIFYHOST, false);
-curl_setopt($ch, CURLOPT_ENCODING, ''); // Handle gzip etc. automatically
+curl_setopt($ch, CURLOPT_RETURNTRANSFER, true); // Return the transfer as a string.
+curl_setopt($ch, CURLOPT_HEADER, true);         // Include the headers in the output.
+curl_setopt($ch, CURLOPT_FOLLOWLOCATION, true); // Follow redirects.
+curl_setopt($ch, CURLOPT_AUTOREFERER, true);    // Automatically set Referer header.
+curl_setopt($ch, CURLOPT_CONNECTTIMEOUT, 15);   // Connection timeout.
+curl_setopt($ch, CURLOPT_TIMEOUT, 30);          // Total request timeout.
+curl_setopt($ch, CURLOPT_SSL_VERIFYPEER, false);// Don't verify SSL cert (for self-signed certs).
+curl_setopt($ch, CURLOPT_SSL_VERIFYHOST, false);// Don't verify SSL host.
+curl_setopt($ch, CURLOPT_ENCODING, '');         // Handle gzip, deflate, etc. automatically.
 
-// --- FORWARD REQUEST HEADERS (CRITICAL FOR COMPATIBILITY) ---
-$req_headers = [];
-$forwardable_headers = getallheaders();
-foreach ($forwardable_headers as $key => $value) {
-    // Let cURL handle these, or they can cause issues
-    if (in_array(strtolower($key), ['host', 'content-length', 'cookie'])) {
-        continue;
-    }
-    $req_headers[] = "$key: $value";
-}
-// Spoof the Host header - ESSENTIAL for virtual hosting
-$req_headers[] = 'Host: ' . $target_parts['host'];
-curl_setopt($ch, CURLOPT_HTTPHEADER, $req_headers);
-
-// Forward cookies separately
-if (isset($forwardable_headers['Cookie'])) {
-    curl_setopt($ch, CURLOPT_COOKIE, $forwardable_headers['Cookie']);
-}
-
-// Forward POST/PUT etc.
-$method = $_SERVER['REQUEST_METHOD'] ?? 'GET';
-if ($method !== 'GET') {
-    curl_setopt($ch, CURLOPT_CUSTOMREQUEST, $method);
-    $input_body = file_get_contents('php://input');
-    if ($input_body) {
-        curl_setopt($ch, CURLOPT_POSTFIELDS, $input_body);
+// Forward essential request headers from the client.
+$headers_to_forward = [];
+$forwardable_headers = ['Accept', 'Accept-Language', 'User-Agent', 'DNT'];
+foreach (getallheaders() as $key => $value) {
+    if (in_array($key, $forwardable_headers)) {
+        $headers_to_forward[] = "$key: $value";
     }
 }
+// Set the Host header to the target's host. This is crucial for virtual hosting.
+$headers_to_forward[] = 'Host: ' . $target_parts['host'];
+curl_setopt($ch, CURLOPT_HTTPHEADER, $headers_to_forward);
 
-// --- EXECUTE & PROCESS RESPONSE ---
+// 4. Execute the cURL request.
 $response = curl_exec($ch);
+
 if ($response === false) {
-    http_response_code(502);
-    die("Upstream fetch failed: " . curl_error($ch));
+    http_response_code(502); // Bad Gateway
+    die("Failed to fetch the upstream URL: " . curl_error($ch));
 }
 
+// 5. Get information about the final request.
 $header_size = curl_getinfo($ch, CURLINFO_HEADER_SIZE);
-$final_url = curl_getinfo($ch, CURLINFO_EFFECTIVE_URL);
+$final_url = curl_getinfo($ch, CURLINFO_EFFECTIVE_URL); // The URL after all redirects.
 $content_type = curl_getinfo($ch, CURLINFO_CONTENT_TYPE);
 $status_code = curl_getinfo($ch, CURLINFO_HTTP_CODE);
 curl_close($ch);
 
+// 6. Separate headers and body from the cURL response.
 $headers_raw = substr($response, 0, $header_size);
 $body = substr($response, $header_size);
 
-// --- FORWARD RESPONSE HEADERS ---
+// 7. Process and forward response headers to the client.
 http_response_code($status_code);
 $header_lines = preg_split('/\\r\\n|\\n|\\r/', trim($headers_raw));
 
-$csp_headers = [
-    'content-security-policy', 'x-content-security-policy',
-    'content-security-policy-report-only', 'x-webkit-csp'
+// Headers that can interfere with the proxy's operation.
+$headers_to_block = [
+    'content-security-policy',
+    'x-frame-options',
+    'strict-transport-security',
+    'content-length',
+    'transfer-encoding',
 ];
 
 foreach ($header_lines as $line) {
-    if (preg_match('/^HTTP\//i', $line)) continue;
-
-    list($key, $value) = array_pad(explode(':', $line, 2), 2, '');
-    $key = trim($key);
-    $value = trim($value);
-
-    // Skip headers that break the proxy
-    if (in_array(strtolower($key), array_merge($csp_headers, ['x-frame-options', 'strict-transport-security', 'content-length', 'transfer-encoding']))) {
+    // Skip the HTTP status line (e.g., "HTTP/1.1 200 OK").
+    if (preg_match('/^HTTP\//i', $line)) {
         continue;
     }
 
-    // Rewrite Location header for redirects
-    if (strtolower($key) === 'location') {
+    list($key, $value) = array_pad(explode(':', $line, 2), 2, '');
+    $key_lower = strtolower(trim($key));
+    $value = trim($value);
+
+    if (in_array($key_lower, $headers_to_block)) {
+        continue;
+    }
+
+    // Rewrite the Location header for redirects.
+    if ($key_lower === 'location') {
         $new_location = resolve_url($value, $final_url);
         header("Location: " . proxy_for($new_location), true);
         continue;
     }
-    // Rewrite Set-Cookie headers
-    if (strtolower($key) === 'set-cookie') {
-        $cookie = preg_replace('/;(\s*)domain=[^;]+/i', '', $value);
-        $cookie = preg_replace('/;(\s*)path=\/[^;]*/i', ';$1path=/', $cookie); // Force path to root
-        header("Set-Cookie: " . $cookie, false);
-        continue;
-    }
-    // Rewrite Link header (for preloads etc)
-    if (strtolower($key) === 'link') {
-        $value = preg_replace_callback('/<([^>]+)>/', fn($m) => '<' . proxy_for(resolve_url($m[1], $final_url)) . '>', $value);
-    }
 
+    // Forward the header, but don't override existing ones (like Location).
     header("$key: $value", false);
 }
 
-// --- REWRITE CONTENT BODY ---
-if (strpos($content_type, 'text/html') !== false) {
-    $doc = new DOMDocument();
-    if ($body) $doc->loadHTML($body, LIBXML_HTML_NOIMPLIED | LIBXML_HTML_NODEFDTD);
+// 8. Rewrite the content body based on its type.
+$content_type_main = trim(explode(';', $content_type)[0]);
 
+if ($content_type_main === 'text/html') {
+    // Use DOMDocument to safely parse and rewrite HTML.
+    // This is more reliable than using regular expressions on HTML.
+    libxml_use_internal_errors(true); // Suppress warnings from malformed HTML.
+    $doc = new DOMDocument();
+    if ($body) {
+        // LIBXML_HTML_NOIMPLIED | LIBXML_HTML_NODEFDTD prevents DOMDocument
+        // from adding extra <html> and <body> tags.
+        $doc->loadHTML($body, LIBXML_HTML_NOIMPLIED | LIBXML_HTML_NODEFDTD);
+    }
+
+    // Determine the base URL for resolving relative paths.
+    // Check for a <base> tag first.
     $base_href = $final_url;
     $base_tags = $doc->getElementsByTagName('base');
     if ($base_tags->length > 0 && $base_tags[0]->hasAttribute('href')) {
         $base_href = resolve_url($base_tags[0]->getAttribute('href'), $final_url);
     }
 
+    // A map of tags and attributes that may contain URLs to rewrite.
     $rewrite_map = [
-        'a' => ['href'], 'area' => ['href'], 'link' => ['href'],
-        'img' => ['src', 'longdesc'], 'script' => ['src'], 'iframe' => ['src'],
-        'form' => ['action'], 'video' => ['poster'], 'audio' => ['src'], 'source' => ['src'],
-        'object' => ['data'], 'embed' => ['src'],
+        'a'      => ['href'],
+        'img'    => ['src', 'longdesc'],
+        'script' => ['src'],
+        'link'   => ['href'],
+        'form'   => ['action'],
+        'iframe' => ['src'],
+        'video'  => ['poster'],
+        'audio'  => ['src'],
+        'source' => ['src'],
     ];
 
     foreach ($rewrite_map as $tag => $attrs) {
-        foreach ($doc->getElementsByTagName($tag) as $el) {
-            $el->removeAttribute('integrity'); // Remove SRI
+        foreach ($doc->getElementsByTagName($tag) as $element) {
             foreach ($attrs as $attr) {
-                if ($el->hasAttribute($attr)) {
-                    $val = $el->getAttribute($attr);
-                    $el->setAttribute($attr, proxy_for(resolve_url($val, $base_href)));
+                if ($element->hasAttribute($attr)) {
+                    $original_url = $element->getAttribute($attr);
+                    $proxied_url = proxy_for(resolve_url($original_url, $base_href));
+                    $element->setAttribute($attr, $proxied_url);
                 }
             }
-            if ($el->hasAttribute('srcset')) {
-                $srcset = $el->getAttribute('srcset');
-                $new_srcset = implode(', ', array_map(fn($part) =>
-                    proxy_for(resolve_url(trim(preg_split('/\s+/', $part, 2)[0]), $base_href)) . ' ' . (preg_split('/\s+/', $part, 2)[1] ?? ''),
-                    explode(',', $srcset)
-                ));
-                $el->setAttribute('srcset', $new_srcset);
+            // Special handling for srcset attribute (responsive images).
+            if ($element->hasAttribute('srcset')) {
+                $srcset = $element->getAttribute('srcset');
+                $new_srcset = implode(', ', array_map(function($part) use ($base_href) {
+                    $parts = preg_split('/\s+/', trim($part), 2);
+                    $url = $parts[0];
+                    $descriptor = $parts[1] ?? '';
+                    return proxy_for(resolve_url($url, $base_href)) . ' ' . $descriptor;
+                }, explode(',', $srcset)));
+                $element->setAttribute('srcset', $new_srcset);
             }
         }
     }
+    
+    // Function to rewrite URLs inside CSS content (e.g., style attributes/tags).
+    $css_rewrite_callback = function($matches) use ($base_href) {
+        $url = trim($matches[1], " \t\n'\"");
+        return 'url("' . proxy_for(resolve_url($url, $base_href)) . '")';
+    };
 
-    foreach($doc->getElementsByTagName('meta') as $el) {
-        if (strtolower($el->getAttribute('http-equiv')) === 'refresh') {
-            $content = $el->getAttribute('content');
-            $new_content = preg_replace_callback('/url=(.*)/i', fn($m) => 'url=' . proxy_for(resolve_url(trim($m[1], "\'\""), $base_href)), $content);
-            $el->setAttribute('content', $new_content);
+    // Rewrite URLs in inline <style> blocks.
+    foreach ($doc->getElementsByTagName('style') as $element) {
+        $element->nodeValue = preg_replace_callback('/url\(([^)]+)\)/i', $css_rewrite_callback, $element->nodeValue);
+    }
+    
+    // Rewrite URLs in inline `style` attributes.
+    foreach ($doc->getElementsByTagName('*') as $element) {
+        if ($element->hasAttribute('style')) {
+            $new_style = preg_replace_callback('/url\(([^)]+)\)/i', $css_rewrite_callback, $element->getAttribute('style'));
+            $element->setAttribute('style', $new_style);
         }
     }
 
-    $css_rewrite_fn = fn($m) => 'url("' . proxy_for(resolve_url(trim($m[1], " \t\n'\""), $base_href)) . '")';
-    foreach ($doc->getElementsByTagName('style') as $el) {
-        $el->nodeValue = preg_replace_callback('/url\(([^)]+)\)/i', $css_rewrite_fn, $el->nodeValue);
-    }
-    foreach ($doc->getElementsByTagName('*') as $el) {
-        if ($el->hasAttribute('style')) {
-            $el->setAttribute('style', preg_replace_callback('/url\(([^)]+)\)/i', $css_rewrite_fn, $el->getAttribute('style')));
-        }
-    }
-    
-    // Inject the Ultimate Client-Side Shim
-    $shim = $doc->createElement('script');
-    $original_loc = json_encode(parse_url($final_url));
-    $proxy_prefix = json_encode(strtok($_SERVER['REQUEST_URI'], '?') . '?url=');
-    
-    $shim->nodeValue = <<<JSS
-(function(){
-    'use strict';
-    const PROXY_PREFIX = {$proxy_prefix};
-    const ORIGINAL_LOCATION = {$original_loc};
-    const ABSOLUTE_PATH_REGEX = /^\/[^\/]/;
-
-    const resolveUrl = (urlStr) => {
-        try {
-            if (typeof urlStr !== 'string' || urlStr.trim() === '') return urlStr;
-            const u = urlStr.trim();
-            if (u.startsWith('data:') || u.startsWith('blob:') || u.startsWith('javascript:') || u.startsWith('#')) return u;
-            // Handle absolute paths like /css/style.css
-            if (ABSOLUTE_PATH_REGEX.test(u)) {
-                return new URL(u, ORIGINAL_LOCATION.scheme + '://' + ORIGINAL_LOCATION.host).toString();
-            }
-            return new URL(u, location.href).toString();
-        } catch (e) { return urlStr; }
-    };
-
-    const toProxy = (urlStr) => PROXY_PREFIX + encodeURIComponent(resolveUrl(urlStr));
-
-    // --- Virtual Location ---
-    const locationHandler = {
-        get: (target, prop) => {
-            switch(prop) {
-                case 'href': return target.href;
-                case 'host': return target.host;
-                case 'hostname': return target.hostname;
-                case 'origin': return target.scheme + '://' + target.host;
-                case 'protocol': return target.scheme + ':';
-                case 'port': return target.port || '';
-                case 'pathname': return target.path || '/';
-                case 'search': return target.query ? '?' + target.query : '';
-                case 'hash': return location.hash; // Real hash
-            }
-            return Reflect.get(location, prop);
-        },
-        set: (target, prop, value) => {
-            if (prop === 'href') location.href = toProxy(value);
-            return true;
-        }
-    };
-    try { Object.defineProperty(window, 'location', { value: new Proxy(ORIGINAL_LOCATION, locationHandler), writable: false }); } 
-    catch(e) { console.warn("Failed to virtualize window.location"); }
-
-    // --- API Hooking ---
-    const origFetch = window.fetch;
-    window.fetch = (input, init) => {
-        if (typeof input === 'string') input = toProxy(input);
-        else if (input && input.url) input.url = toProxy(input.url);
-        return origFetch(input, init);
-    };
-    const origOpen = XMLHttpRequest.prototype.open;
-    XMLHttpRequest.prototype.open = function(method, url) {
-        if (typeof url === 'string') arguments[1] = toProxy(url);
-        return origOpen.apply(this, arguments);
-    };
-    const origSendBeacon = navigator.sendBeacon;
-    if (origSendBeacon) {
-      navigator.sendBeacon = (url, data) => origSendBeacon.call(navigator, toProxy(url), data);
-    }
-    
-    // --- History API for SPAs ---
-    const origHistory = window.history;
-    const wrapHistory = (funcName) => {
-        const orig = origHistory[funcName];
-        origHistory[funcName] = function(state, title, url) {
-            if (url) arguments[2] = toProxy(url);
-            return orig.apply(this, arguments);
-        };
-    };
-    wrapHistory('pushState'); wrapHistory('replaceState');
-
-    // --- Disable Incompatible Features ---
-    try { navigator.serviceWorker.register = () => Promise.reject('ServiceWorkers disabled by proxy.'); } catch(e){}
-    if ('WebSocket' in window) { try { window.WebSocket = () => { throw new Error('WebSocket blocked by proxy.'); }; } catch(e){} }
-    
-    // --- Dynamic Content Rewriting ---
-    new MutationObserver(mutations => {
-        mutations.forEach(m => m.addedNodes.forEach(n => {
-            if (n.nodeType === 1) { // ELEMENT_NODE
-                const rewrite = el => {
-                    const attrs = {'src':1, 'href':1, 'action':1, 'poster':1};
-                    Object.keys(attrs).forEach(a => { if(el[a]) el[a] = toProxy(el[a]); });
-                    if(el.srcset) el.srcset = el.srcset.split(',').map(p=>toProxy(p.trim().split(/\s+/)[0])+' '+(p.trim().split(/\s+/)[1]||'')).join(',');
-                };
-                rewrite(n);
-                n.querySelectorAll('img,script,a,link,iframe,form,video,source,audio,embed,object,area').forEach(rewrite);
-            }
-        }));
-    }).observe(document.documentElement, { childList: true, subtree: true });
-})();
-JSS;
-
-    $head = $doc->getElementsByTagName('head')->item(0);
-    if ($head) {
-        $head->insertBefore($shim, $head->firstChild);
-    } else {
-        $doc->documentElement->insertBefore($shim, $doc->documentElement->firstChild);
-    }
-    
     echo $doc->saveHTML();
 
-} elseif (in_array(explode(';', $content_type)[0], ['text/css', 'application/javascript', 'text/javascript'])) {
-    $body = preg_replace_callback(
-        '/(["\'`])(https?:\\/\\/[^\\s\'"`]+)\1|url\\(([^)]+)\\)/i',
-        function($m) use ($final_url) {
-            $url = $m[3] ?? ($m[2] ?? '');
-            $url = trim($url, " \t'\"");
-            $proxied = proxy_for(resolve_url($url, $final_url));
-            if (isset($m[3])) return "url('{$proxied}')";
-            return $m[1] . $proxied . $m[1];
-        },
-        $body
-    );
+} elseif ($content_type_main === 'text/css') {
+    // For external CSS files, rewrite url() values.
+    $body = preg_replace_callback('/url\(([^)]+)\)/i', function($matches) use ($final_url) {
+        $url = trim($matches[1], " \t\n'\"");
+        return 'url("' . proxy_for(resolve_url($url, $final_url)) . '")';
+    }, $body);
     echo $body;
+
 } else {
+    // For all other content types (images, fonts, etc.), pass them through directly.
     echo $body;
 }
 
