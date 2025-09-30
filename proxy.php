@@ -177,6 +177,12 @@ foreach ($header_lines as $line) {
     header("$key: $value", false);
 }
 
+// Explicitly set the final Content-Type header to ensure the browser renders it correctly.
+// This is more reliable than forwarding it from the raw headers, especially after redirects.
+if ($content_type) {
+    header('Content-Type: ' . $content_type);
+}
+
 // 8. Rewrite the content body based on its type.
 $content_type_main = trim(explode(';', $content_type)[0]);
 
