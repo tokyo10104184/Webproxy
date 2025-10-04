@@ -1,11 +1,21 @@
 <?php
 // Simplified PHP Web Proxy
 
+// --- DEBUG MODE ---
+// Enable debug mode by adding &debug=1 to the URL.
+$debug_mode = isset($_GET['debug']) && $_GET['debug'] === '1';
+
 // --- CONFIGURATION ---
-// Report all errors except notices. This is good for development.
-// For production, you might want to log errors to a file instead.
-error_reporting(E_ALL & ~E_NOTICE);
-ini_set('display_errors', 1); // Show errors for easier debugging
+// Configure error reporting based on debug mode.
+if ($debug_mode) {
+    // In debug mode, show all possible errors.
+    error_reporting(E_ALL);
+    ini_set('display_errors', 1);
+} else {
+    // In production mode, hide errors from the user.
+    error_reporting(0);
+    ini_set('display_errors', 0);
+}
 
 // Set a reasonable time limit for the script to prevent timeouts on slow sites.
 set_time_limit(120);
@@ -67,9 +77,17 @@ function resolve_url(string $relative, string $base): string {
  * @return string The URL that will proxy the target URL.
  */
 function proxy_for(string $url): string {
+    global $debug_mode;
     // Get the path of the current script.
     $script_path = strtok($_SERVER['REQUEST_URI'], '?');
-    return $script_path . '?url=' . rawurlencode($url);
+    $proxy_url = $script_path . '?url=' . rawurlencode($url);
+
+    // Preserve debug mode across proxied URLs.
+    if ($debug_mode) {
+        $proxy_url .= '&debug=1';
+    }
+
+    return $proxy_url;
 }
 
 // --- MAIN PROXY LOGIC ---
@@ -125,7 +143,13 @@ $response = curl_exec($ch);
 
 if ($response === false) {
     http_response_code(502); // Bad Gateway
-    die("Failed to fetch the upstream URL: " . curl_error($ch));
+    if ($debug_mode) {
+        // In debug mode, show detailed cURL error information.
+        die("<h3>Proxy Error</h3><p>Failed to fetch the upstream URL: <strong>" . htmlspecialchars($target_url) . "</strong></p><p>cURL Error: <strong>" . htmlspecialchars(curl_error($ch)) . "</strong></p>");
+    } else {
+        // In production mode, show a generic error.
+        die("<h3>Proxy Error</h3><p>The requested page could not be retrieved.</p>");
+    }
 }
 
 // 5. Get information about the final request.
