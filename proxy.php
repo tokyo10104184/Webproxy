@@ -174,6 +174,7 @@ $headers_to_block = [
     'strict-transport-security',
     'content-length',
     'transfer-encoding',
+    'content-type', // Will be set explicitly later from a more reliable source.
 ];
 
 foreach ($header_lines as $line) {
