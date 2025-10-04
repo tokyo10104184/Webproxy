@@ -1,0 +1,10 @@
+# --- PHP Handler Configuration ---
+# Ensure that .php files are processed by the PHP engine.
+# This is crucial for preventing PHP source code from being displayed as plain text.
+<FilesMatch "\.php$">
+    SetHandler application/x-httpd-php
+</FilesMatch>
+
+# --- Directory Index ---
+# Set the default file to serve when a directory is requested.
+DirectoryIndex index.html index.php
